@@ -16,7 +16,6 @@ jobs:
           ZIP="$(ls *.zip | head -n1)"
           echo "Using $ZIP"
           unzip -q "$ZIP" -d project
-          ls project/android
 
       - uses: actions/setup-java@v5
         with:
@@ -29,7 +28,26 @@ jobs:
 
       - name: Build debug APK
         working-directory: project/android
-        run: gradle assembleDebug --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace 2>&1 | tee ../build.log
+
+      - name: Show errors
+        if: failure()
+        run: |
+          {
+            echo '## Build errors'
+            echo '```'
+            grep -E '^e: ' project/build.log | head -40
+            grep -A6 'What went wrong' project/build.log | head -30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: project/build.log
 
       - uses: actions/upload-artifact@v4
         with:
