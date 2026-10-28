@@ -1,0 +1,113 @@
+name: Build Grip Native Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-native-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate native Grip Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f android/gradlew ] && [ -f android/app/src/main/AndroidManifest.xml ]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
+          elif GRADLEW_IN_REPO="$(find . -maxdepth 3 -type f -path '*/android/gradlew' -not -path './unpacked/*' | head -n1)" && [ -n "$GRADLEW_IN_REPO" ]; then
+            # The project folder was uploaded as a sub-folder of the repo (e.g. grip_v12_current/android).
+            PROJECT_DIR="$(cd "$(dirname "$(dirname "$GRADLEW_IN_REPO")")" && pwd)"
+          else
+            ZIP="$(find . -maxdepth 2 -type f \( -name 'Grip_Android_*_v*.zip' -o -name 'Grip_Android_First_Patch_*.zip' \) -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+            if [ -z "$ZIP" ]; then
+              echo "Native Android project not found. Commit the project folder or include a Grip Android source ZIP." >&2
+              exit 1
+            fi
+            mkdir -p unpacked
+            unzip -q "$ZIP" -d unpacked
+            GRADLEW="$(find unpacked -maxdepth 6 -type f -path '*/android/gradlew' | head -n1)"
+            if [ -z "$GRADLEW" ]; then
+              echo "No native android/gradlew found in source ZIP." >&2
+              exit 1
+            fi
+            PROJECT_DIR="$(dirname "$(dirname "$GRADLEW")")"
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Native project: $PROJECT_DIR"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: '**/*.gradle*'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Build installable debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR/android"
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew --no-daemon clean :app:assembleDebug --stacktrace 2>&1 | tee "$PROJECT_DIR/android-build.log"
+
+      - name: Run unit tests and lint diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR/android"
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug --stacktrace 2>&1 | tee -a "$PROJECT_DIR/android-build.log"
+
+      - name: Verify APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$PROJECT_DIR/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" > "$PROJECT_DIR/apk-badging.txt"
+          sed -n '1,5p' "$PROJECT_DIR/apk-badging.txt"
+
+          # Guard: this must be the native Kotlin/Compose app, never a Capacitor/web wrapper.
+          grep -q "^package: name='com.grip.app'" "$PROJECT_DIR/apk-badging.txt" \
+            || { echo "APK package is not com.grip.app" >&2; exit 1; }
+          grep -q "^launchable-activity: name='com.grip.app.ui.MainActivity'" "$PROJECT_DIR/apk-badging.txt" \
+            || { echo "Launcher activity is not the native com.grip.app.ui.MainActivity" >&2; exit 1; }
+          if unzip -l "$APK" | grep -qE 'assets/(public/|capacitor\.config\.json)'; then
+            echo "APK contains bundled web assets (Capacitor wrapper). Refusing to publish it." >&2
+            exit 1
+          fi
+          echo "Verified: native Grip app (com.grip.app.ui.MainActivity), no web wrapper assets."
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grip-native-android-debug-apk
+          path: '**/android/app/build/outputs/apk/debug/app-debug.apk'
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grip-native-android-build-log
+          path: |
+            **/android-build.log
+            **/apk-badging.txt
+          if-no-files-found: warn
+          retention-days: 14
