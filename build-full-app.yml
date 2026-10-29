@@ -21,7 +21,7 @@ jobs:
           set -euo pipefail
           if [ -f android/gradlew ] && [ -f android/app/src/main/AndroidManifest.xml ]; then
             PROJECT_DIR="$GITHUB_WORKSPACE"
-          elif GRADLEW_IN_REPO="$(find . -maxdepth 3 -type f -path '*/android/gradlew' -not -path './unpacked/*' | head -n1)" && [ -n "$GRADLEW_IN_REPO" ]; then
+          elif GRADLEW_IN_REPO="$(find . -maxdepth 3 -type f -path '*/android/gradlew' -not -path './unpacked/*' | sed -n '1p')" && [ -n "$GRADLEW_IN_REPO" ]; then
             # The project folder was uploaded as a sub-folder of the repo (e.g. grip_v12_current/android).
             PROJECT_DIR="$(cd "$(dirname "$(dirname "$GRADLEW_IN_REPO")")" && pwd)"
           else
@@ -32,12 +32,12 @@ jobs:
             fi
             mkdir -p unpacked
             unzip -q "$ZIP" -d unpacked
-            GRADLEW="$(find unpacked -maxdepth 6 -type f -path '*/android/gradlew' | head -n1)"
+            GRADLEW="$(find unpacked -maxdepth 6 -type f -path '*/android/gradlew' | sed -n '1p')"
             if [ -z "$GRADLEW" ]; then
               echo "No native android/gradlew found in source ZIP." >&2
               exit 1
             fi
-            PROJECT_DIR="$(dirname "$(dirname "$GRADLEW")")"
+            PROJECT_DIR="$(cd "$(dirname "$(dirname "$GRADLEW")")" && pwd)"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Native project: $PROJECT_DIR"
@@ -50,6 +50,9 @@ jobs:
           cache-dependency-path: '**/*.gradle*'
 
       - uses: android-actions/setup-android@v3
+        with:
+          # Default is 'tools platform-tools'; the 'tools' package no longer exists and made this step fail.
+          packages: 'platform-tools'
 
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
@@ -86,7 +89,8 @@ jobs:
             || { echo "APK package is not com.grip.app" >&2; exit 1; }
           grep -q "^launchable-activity: name='com.grip.app.ui.MainActivity'" "$PROJECT_DIR/apk-badging.txt" \
             || { echo "Launcher activity is not the native com.grip.app.ui.MainActivity" >&2; exit 1; }
-          if unzip -l "$APK" | grep -qE 'assets/(public/|capacitor\.config\.json)'; then
+          unzip -l "$APK" > "$PROJECT_DIR/apk-files.txt"
+          if grep -qE 'assets/(public/|capacitor\.config\.json)' "$PROJECT_DIR/apk-files.txt"; then
             echo "APK contains bundled web assets (Capacitor wrapper). Refusing to publish it." >&2
             exit 1
           fi
